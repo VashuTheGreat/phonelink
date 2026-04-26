@@ -2,12 +2,15 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { StyleSheet, Text, View, TouchableOpacity, ScrollView, NativeModules, NativeEventEmitter, PermissionsAndroid, Platform } from 'react-native';
 import * as Network from 'expo-network';
 
-const { HttpServerModule, PhoneCallModule } = NativeModules;
-const eventEmitter = new NativeEventEmitter(HttpServerModule);
+const { HttpServerModule, PhoneCallModule, BluetoothServerModule } = NativeModules;
+const httpEventEmitter = new NativeEventEmitter(HttpServerModule);
+const btEventEmitter = new NativeEventEmitter(BluetoothServerModule);
 
 export default function App() {
   const [ipAddress, setIpAddress] = useState('Loading...');
-  const [isServerRunning, setIsServerRunning] = useState(false);
+  const [isHttpServerRunning, setIsHttpServerRunning] = useState(false);
+  const [isBTServerRunning, setIsBTServerRunning] = useState(false);
+  const [btStatus, setBtStatus] = useState('disconnected');
   const [logs, setLogs] = useState([]);
 
   const addLog = useCallback((message) => {
@@ -21,31 +24,55 @@ export default function App() {
       setIpAddress(ip);
     })();
 
-    const subscription = eventEmitter.addListener('onCallRequested', (event) => {
+    // HTTP Events
+    const httpSub = httpEventEmitter.addListener('onCallRequested', (event) => {
       const { number } = event;
-      addLog(`Incoming call request for: ${number}`);
+      addLog(`[HTTP] Incoming call request for: ${number}`);
       makeCall(number);
     });
 
+    // Bluetooth Events
+    const btCmdSub = btEventEmitter.addListener('onBTCommandReceived', (event) => {
+      const { action, number } = event;
+      addLog(`[BT] Command received: ${action} ${number ? number : ''}`);
+      if (action === 'dial' && number) {
+        makeCall(number);
+      } else if (action === 'answer') {
+        answerCall();
+      } else if (action === 'hangup') {
+        hangupCall();
+      }
+    });
+
+    const btStatusSub = btEventEmitter.addListener('onBTStatusChanged', (event) => {
+      const { data } = event;
+      setBtStatus(data);
+    });
+
+    const btLogSub = btEventEmitter.addListener('onBTLog', (event) => {
+      const { data } = event;
+      addLog(`[BT] ${data}`);
+    });
+
     return () => {
-      subscription.remove();
+      httpSub.remove();
+      btCmdSub.remove();
+      btStatusSub.remove();
+      btLogSub.remove();
     };
   }, [addLog]);
 
-  const requestCallPermission = async () => {
+  const requestPermissions = async () => {
     if (Platform.OS === 'android') {
       try {
-        const granted = await PermissionsAndroid.request(
+        const granted = await PermissionsAndroid.requestMultiple([
           PermissionsAndroid.PERMISSIONS.CALL_PHONE,
-          {
-            title: 'Phone Call Permission',
-            message: 'This app needs access to make phone calls.',
-            buttonNeutral: 'Ask Me Later',
-            buttonNegative: 'Cancel',
-            buttonPositive: 'OK',
-          }
-        );
-        return granted === PermissionsAndroid.RESULTS.GRANTED;
+          PermissionsAndroid.PERMISSIONS.ANSWER_PHONE_CALLS,
+          PermissionsAndroid.PERMISSIONS.READ_PHONE_STATE,
+          PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT,
+          PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN,
+        ]);
+        return granted['android.permission.CALL_PHONE'] === PermissionsAndroid.RESULTS.GRANTED;
       } catch (err) {
         console.warn(err);
         return false;
@@ -55,7 +82,7 @@ export default function App() {
   };
 
   const makeCall = async (number) => {
-    const hasPermission = await requestCallPermission();
+    const hasPermission = await requestPermissions();
     if (hasPermission) {
       addLog(`Initiating call to: ${number}`);
       PhoneCallModule.makeCall(number);
@@ -64,15 +91,46 @@ export default function App() {
     }
   };
 
-  const toggleServer = () => {
-    if (isServerRunning) {
+  const answerCall = async () => {
+    const hasPermission = await requestPermissions();
+    if (hasPermission) {
+      addLog('Answering incoming call');
+      PhoneCallModule.answerCall();
+    } else {
+      addLog('Permission denied to answer call.');
+    }
+  };
+
+  const hangupCall = async () => {
+    const hasPermission = await requestPermissions();
+    if (hasPermission) {
+      addLog('Hanging up call');
+      PhoneCallModule.hangupCall();
+    } else {
+      addLog('Permission denied to hangup call.');
+    }
+  };
+
+  const toggleHttpServer = () => {
+    if (isHttpServerRunning) {
       HttpServerModule.stopServer();
-      setIsServerRunning(false);
-      addLog('Server stopped.');
+      setIsHttpServerRunning(false);
+      addLog('HTTP Server stopped.');
     } else {
       HttpServerModule.startServer(5000);
-      setIsServerRunning(true);
-      addLog('Server started on port 5000.');
+      setIsHttpServerRunning(true);
+      addLog('HTTP Server started on port 5000.');
+    }
+  };
+
+  const toggleBTServer = async () => {
+    await requestPermissions();
+    if (isBTServerRunning) {
+      BluetoothServerModule.stopServer();
+      setIsBTServerRunning(false);
+    } else {
+      BluetoothServerModule.startServer();
+      setIsBTServerRunning(true);
     }
   };
 
@@ -93,19 +151,32 @@ export default function App() {
           <Text style={styles.value}>{ipAddress}</Text>
         </View>
         <View style={styles.infoRow}>
-          <Text style={styles.label}>Server Status:</Text>
-          <Text style={[styles.value, { color: isServerRunning ? '#4CAF50' : '#F44336' }]}>
-            {isServerRunning ? 'RUNNING' : 'STOPPED'}
+          <Text style={styles.label}>HTTP Status:</Text>
+          <Text style={[styles.value, { color: isHttpServerRunning ? '#4CAF50' : '#F44336' }]}>
+            {isHttpServerRunning ? 'RUNNING' : 'STOPPED'}
+          </Text>
+        </View>
+        <View style={styles.infoRow}>
+          <Text style={styles.label}>BT Status:</Text>
+          <Text style={[styles.value, { color: btStatus === 'connected' ? '#4CAF50' : btStatus === 'listening' ? '#FF9800' : '#F44336' }]}>
+            {btStatus.toUpperCase()}
           </Text>
         </View>
       </View>
 
       <View style={styles.buttonContainer}>
         <TouchableOpacity 
-          style={[styles.button, isServerRunning ? styles.stopButton : styles.startButton]} 
-          onPress={toggleServer}
+          style={[styles.button, isHttpServerRunning ? styles.stopButton : styles.startButton]} 
+          onPress={toggleHttpServer}
         >
-          <Text style={styles.buttonText}>{isServerRunning ? 'Stop Server' : 'Start Server'}</Text>
+          <Text style={styles.buttonText}>{isHttpServerRunning ? 'Stop HTTP Server' : 'Start HTTP Server'}</Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity 
+          style={[styles.button, isBTServerRunning ? styles.stopButton : styles.btButton]} 
+          onPress={toggleBTServer}
+        >
+          <Text style={styles.buttonText}>{isBTServerRunning ? 'Stop BT Server' : 'Start BT Server'}</Text>
         </TouchableOpacity>
 
         <TouchableOpacity style={[styles.button, styles.testButton]} onPress={testCall}>
@@ -114,7 +185,7 @@ export default function App() {
       </View>
 
       <View style={styles.logContainer}>
-        <Text style={styles.logTitle}>Recent Requests</Text>
+        <Text style={styles.logTitle}>Logs & Requests</Text>
         <ScrollView style={styles.scrollView}>
           {logs.length === 0 ? (
             <Text style={styles.noLogs}>No logs yet...</Text>
@@ -137,7 +208,7 @@ const styles = StyleSheet.create({
     paddingTop: 60,
   },
   header: {
-    marginBottom: 30,
+    marginBottom: 20,
     alignItems: 'center',
   },
   title: {
@@ -153,8 +224,8 @@ const styles = StyleSheet.create({
   statusCard: {
     backgroundColor: '#FFFFFF',
     borderRadius: 15,
-    padding: 20,
-    marginBottom: 30,
+    padding: 15,
+    marginBottom: 20,
     elevation: 3,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 2 },
@@ -164,7 +235,7 @@ const styles = StyleSheet.create({
   infoRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    paddingVertical: 10,
+    paddingVertical: 8,
     borderBottomWidth: 1,
     borderBottomColor: '#F0F0F0',
   },
@@ -180,17 +251,20 @@ const styles = StyleSheet.create({
   },
   buttonContainer: {
     flexDirection: 'column',
-    gap: 15,
-    marginBottom: 30,
+    gap: 10,
+    marginBottom: 20,
   },
   button: {
-    padding: 15,
+    padding: 12,
     borderRadius: 10,
     alignItems: 'center',
     elevation: 2,
   },
   startButton: {
     backgroundColor: '#00B894',
+  },
+  btButton: {
+    backgroundColor: '#6C5CE7',
   },
   stopButton: {
     backgroundColor: '#D63031',
@@ -200,7 +274,7 @@ const styles = StyleSheet.create({
   },
   buttonText: {
     color: '#FFFFFF',
-    fontSize: 18,
+    fontSize: 16,
     fontWeight: 'bold',
   },
   logContainer: {
