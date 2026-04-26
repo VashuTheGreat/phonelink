@@ -54,11 +54,19 @@ class PhoneLinkBTClient:
         
         # We don't have SDP via native sockets easily, so we try RFCOMM ports 1 to 30
         connected = False
-        for port in range(1, 15): # Usually Android SPP is between 1 and 10
+        
+        # We try port 13 first because we attempted to fix the Android side to 13.
+        ports_to_try = [13] + list(range(1, 31))
+        
+        for port in ports_to_try:
             try:
-                print(f"Trying RFCOMM port {port}...")
+                if port == 13:
+                    print(f"Trying preferred RFCOMM port 13...")
+                else:
+                    print(f"Trying RFCOMM port {port}...")
+                    
                 s = socket.socket(socket.AF_BLUETOOTH, socket.SOCK_STREAM, socket.BTPROTO_RFCOMM)
-                s.settimeout(3.0) # 3 seconds timeout per port
+                s.settimeout(2.0) # 2 seconds timeout per port
                 s.connect((address, port))
                 
                 # Check for handshake
